@@ -12,6 +12,7 @@ visitor has seen so far, and when they leave or come back. Nothing is saved.
 """
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -181,8 +182,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 to listen on your network")
+    # Hosts like Render set PORT and need 0.0.0.0; locally we stay on 127.0.0.1:8000.
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
+    ap.add_argument("--host", default="0.0.0.0" if os.environ.get("PORT") else "127.0.0.1",
+                    help="use 0.0.0.0 to listen on your network")
     ap.add_argument("--page", default=str(Handler.page_path), help="path to the HTML page")
     args = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
