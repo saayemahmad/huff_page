@@ -145,7 +145,7 @@ Render sets `PORT`, and the server then binds to `0.0.0.0` on its own.
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `8000` | HTTP port. Render sets this automatically. |
-| `FIREBASE_DB_URL` | `https://dev-ca098-default-rtdb.firebaseio.com` | Realtime Database URL for log mirroring |
+| `FIREBASE_DB_URL` | `https://xxxxxxxx-default-rtdb.firebaseio.com` | Realtime Database URL for log mirroring |
 | `FIREBASE_LOG_PATH` | `logs` | Path in the database where logs are stored |
 
 CLI flags: `--port`, `--host`, `--page <path-to-html>`.
