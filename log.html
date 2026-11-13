@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>live log</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --dim: #777777; --line: #e2e2e2; --err: #c62828; --ok: #2e7d32; --warn: #b26a00; --hit: #fff3b0;
+    color-scheme: light;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e0e0e; --fg: #dcdcdc; --dim: #808080; --line: #262626; --err: #ff6b6b; --ok: #6fcf7f; --warn: #e0a64a; --hit: #4a4200;
+      color-scheme: dark;
+    }
+  }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .status { text-transform: uppercase; letter-spacing: .08em; color: var(--dim); }
+  .status::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; background: var(--warn); }
+  .status.on::before { background: var(--ok); }
+  .status.off::before { background: var(--err); }
+  .count { color: var(--dim); }
+  .spacer { flex: 1; }
+  input[type=search] { font: inherit; color: inherit; background: transparent; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 3px 2px; width: 160px; outline: none; }
+  input[type=search]:focus { border-bottom-color: var(--fg); }
+  button { font: inherit; text-transform: uppercase; letter-spacing: .08em; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 0; padding: 3px 9px; cursor: pointer; }
+  button:hover { border-color: var(--fg); }
+  button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  main { flex: 1; overflow: auto; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .row { display: flex; gap: 14px; padding: 2px 14px; border-bottom: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; }
+  .row[hidden] { display: none; }
+  .row .t { flex: none; color: var(--dim); }
+  .row.err .m { color: var(--err); }
+  .row mark { background: var(--hit); color: inherit; }
+  .empty { padding: 24px 14px; color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <span id="status" class="status">connecting</span>
+  <span id="count" class="count">0 lines</span>
+  <span class="spacer"></span>
+  <input id="q" type="search" placeholder="filter" autocomplete="off" spellcheck="false">
+  <button id="follow" aria-pressed="true" title="Keep scrolled to the newest line">follow</button>
+  <button id="pause" aria-pressed="false" title="Freeze the view; new lines keep arriving in the background">pause</button>
+  <button id="clear" title="Clears this view only; the database is untouched">clear view</button>
+  <button id="dl" title="Download the lines shown as a text file">download</button>
+</header>
+<main id="log"><div class="empty" id="empty">waiting for logs...</div></main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-database-compat.js"></script>
+<script>
+(function () {
+  var DB_URL = 'https://dev-ca098-default-rtdb.firebaseio.com';
+  var PATH = 'logs';
+  var BACKLOG = 1000;      // how many recent lines to load when the page opens
+  var MAX_ROWS = 5000;     // oldest rows are dropped from the view beyond this
+
+  var logEl = document.getElementById('log');
+  var statusEl = document.getElementById('status');
+  var countEl = document.getElementById('count');
+  var qEl = document.getElementById('q');
+  var followBtn = document.getElementById('follow');
+  var pauseBtn = document.getElementById('pause');
+  var emptyEl = document.getElementById('empty');
+
+  var follow = true, paused = false, pending = [], rows = [], filter = '';
+
+  function pad(n, w) { n = String(n); while (n.length < (w || 2)) n = '0' + n; return n; }
+  function fmt(t) {
+    var d = new Date(t);
+    return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + '.' + pad(d.getMilliseconds(), 3);
+  }
+  function setCount() { countEl.textContent = rows.length + ' lines'; }
+  function matches(text) { return !filter || text.toLowerCase().indexOf(filter) !== -1; }
+
+  function makeRow(v) {
+    var el = document.createElement('div');
+    el.className = 'row' + (v.s === 'err' ? ' err' : '');
+    var t = document.createElement('span'); t.className = 't'; t.textContent = fmt(v.t);
+    var m = document.createElement('span'); m.className = 'm'; m.textContent = v.m;
+    el.appendChild(t); el.appendChild(m);
+    el.hidden = !matches(v.m);
+    return { el: el, text: v.m, t: v.t, s: v.s };
+  }
+
+  function nearBottom() { return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40; }
+  function toBottom() { logEl.scrollTop = logEl.scrollHeight; }
+
+  function append(list) {
+    if (!list.length) return;
+    if (emptyEl) { emptyEl.remove(); emptyEl = null; }
+    var stick = follow && (nearBottom() || rows.length === 0);
+    var frag = document.createDocumentFragment();
+    list.forEach(function (v) { var r = makeRow(v); rows.push(r); frag.appendChild(r.el); });
+    logEl.appendChild(frag);
+    while (rows.length > MAX_ROWS) rows.shift().el.remove();
+    setCount();
+    if (stick) toBottom();
+  }
+
+  function onLine(v) {
+    if (!v || typeof v.m !== 'string') return;
+    if (paused) pending.push(v); else append([v]);
+  }
+
+  // Firebase
+  firebase.initializeApp({ databaseURL: DB_URL });
+  var db = firebase.database();
+  db.ref('.info/connected').on('value', function (snap) {
+    var on = snap.val() === true;
+    statusEl.textContent = on ? 'live' : 'reconnecting';
+    statusEl.className = 'status ' + (on ? 'on' : 'off');
+  });
+  // onChildAdded fires for the recent backlog first, then for each new line as it is written.
+  db.ref(PATH).orderByKey().limitToLast(BACKLOG).on('child_added', function (snap) { onLine(snap.val()); });
+
+  // Controls
+  followBtn.addEventListener('click', function () {
+    follow = !follow;
+    followBtn.setAttribute('aria-pressed', follow);
+    if (follow) toBottom();
+  });
+  pauseBtn.addEventListener('click', function () {
+    paused = !paused;
+    pauseBtn.setAttribute('aria-pressed', paused);
+    pauseBtn.textContent = paused ? 'resume' : 'pause';
+    if (!paused) { var p = pending; pending = []; append(p); }
+  });
+  document.getElementById('clear').addEventListener('click', function () {
+    rows.forEach(function (r) { r.el.remove(); });
+    rows = []; setCount();
+  });
+  document.getElementById('dl').addEventListener('click', function () {
+    var text = rows.filter(function (r) { return !r.el.hidden; }).map(function (r) {
+      return fmt(r.t) + (r.s === 'err' ? ' [err] ' : '  ') + r.text;
+    }).join('\n') + '\n';
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    a.download = 'log-' + Date.now() + '.txt';
+    document.body.appendChild(a); a.click(); a.remove();
+  });
+  qEl.addEventListener('input', function () {
+    filter = qEl.value.trim().toLowerCase();
+    rows.forEach(function (r) { r.el.hidden = !matches(r.text); });
+  });
+  logEl.addEventListener('scroll', function () {
+    if (!nearBottom() && follow) { follow = false; followBtn.setAttribute('aria-pressed', false); }
+  });
+})();
+</script>
+</body>
+</html>
